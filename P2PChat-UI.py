@@ -21,11 +21,13 @@ username = "" 							#Store the username that is defined by the user
 clientStatus = "STARTED"					#The status of the client as dictated by the state diagram
 chatHashID = ""							#The chat's hashID after joining a chat room, to be used for comparing with new hash ID on each KEEPALIVE request.
 msgID = 0							#message ID of the last message sent
+myRoom = ""							#Name of the room currently joined
 membersList = []						#List of information of all members in the chat room
-backlinks = []							#Array of tuples containing information of the backwar linked clients, along with the socket to contact them
+backlinks = []							#Array of tuples containing information of the backward linked clients, along with the socket to contact them
 forwardLink = ()						#Tuple containing information of the forward linked client, along with the socket to contact them
+messages = []							#Array storing the messages received (the hash ID of the sender, along with the msgID)
+hashes = []							#Array of tuples containing information of members, along with their hash ID
 
-#
 # This is the hash function for generating a unique
 # Hash ID for each peer.
 # Source: http://www.cse.yorku.ca/~oz/hash.html
@@ -101,7 +103,9 @@ def do_Join():
 						membersList.append(group)
 						CmdWin.insert(1.0, "\n"+str(group))
 					clientStatus = "JOINED"
-				
+					
+					global myRoom
+					myRoom = roomname
 					_thread.start_new_thread (keepAliveProcedure, ())	#Start a new thread runnning the keepAliveProcedure
 					_thread.start_new_thread (serverProcedure, ())		#Start a new thread runnning the server part of P2P
 					findP2PPeer(membersList)				
@@ -160,11 +164,11 @@ def serverProcedure():
 				backlinks.append(((connectorInfo[1:4],sdbm_hash(concat)), conn))		#add information of new connection to backlinks array
 				global clientStatus
 				clientStatus = "CONNECTED"
-				_thread.start_new_thread (handlePeer, (conn, ))					#Start a new thread runnning the server part of P2P
+				_thread.start_new_thread (handlePeer, ("Backward", conn, ))					#Start a new thread runnning the server part of P2P
 		else:
 			conn.close()										#anything other than P or T must be failure so close
 	
-def handlePeer(conn):
+def handlePeer(linkType, conn):
 	while conn:
 		response = conn.recv(1024)
 		response = str(response.decode("utf-8"))
@@ -172,21 +176,32 @@ def handlePeer(conn):
 		if response[0] == 'T':											#M stands for member list, so successful JOIN request
 			response = response[2:-4]
 			msgInfo = response.split(":")
-			print (str(msgInfo))
+			room = msgInfo[0]
 			
+			if room == myRoom:
+				originHashID = msgInfo[1]
+				originUsername = msgInfo[2]
+				originMsgID = msgInfo[3]
+				originMsgLen = msgInfo[4]
+				originMsg = response[-(int(originMsgLen)):]
 			
+				global messages
+				if (originHashID, originMsgID) not in messages:
+					MsgWin.insert(1.0, "\n["+originUsername+"] "+originMsg)
+					messages.append((originHashID, originMsgID))
+					echoMessage(originHashID, originUsername, originMsg, originMsgID)
+					arr = [member for member in hashes if str(member[1]) == str(originHashID) ]
+					if not arr:
+						print("not found hash", str(arr))
+						updateMembersList("Peer Handler")
+			else:
+				print("Recvd message from wrong chat room")
 		elif response[0] == 'F':
 			print("Error in message recvd")
-		
-		
-		#checks the roomname to see if this is the chatroom group I am in. 
-		#If not, it drops the TEXT message and outputs an error message
-		#If yes, use the originHID and msgID to make sure that this is a new message from the origin peer that the program hasn’t seen before
-		#If seen, drops the TEXT message and outputs an error message
-		#If this is a new message from that originHID peer, the program displays the origin username and the message content to the Message Window and forwards this TEXT message to all peers that are linked (forward or backward) to this program (except the origin peer and the peer which this TEXT message was coming from). 
-			#The program memorizes this msgID as the last message ID used by this originHID peer. 
-			#Maybe the message was originated from an unknown peer. Run updateMembersList before updating
-		
+	
+	if linkType == "Forward":
+		updateMembersList("Peer Quit")
+		findP2PPeer(membersList)
 		
 def updateMembersList(src):
 	roomServerSocket.send(bytearray("J:"+roomname+":"+username+":"+myIP+":"+myPort+"::\r\n", 'utf-8'))	
@@ -206,12 +221,15 @@ def updateMembersList(src):
 			for group in chunker(members[1:], 3):
 				membersList.append(group)
 			print("Member list updated!")
+			
+			calculateHashes(membersList)
 		return True
 	elif response[0] == 'F':										#F stands for failure, throw error
 		print("Error in performing JOIN request!")
 		return False
-
-def findP2PPeer(membersList):
+		
+def calculateHashes(membersList):
+	global hashes 
 	hashes = []
 	for member in membersList:
 		concat = ""
@@ -221,8 +239,12 @@ def findP2PPeer(membersList):
 		if member[0] == username:
 			myInfo = member
 	hashes = sorted(hashes, key=lambda tup: tup[1])
-	
+
+def findP2PPeer(membersList):
+	calculateHashes(membersList)
+	global hashes
 	global myHashID
+	
 	myHashID = sdbm_hash(username+myIP+myPort)
 	start = (hashes.index((myInfo, myHashID)) + 1) % len(hashes)
 
@@ -243,7 +265,7 @@ def findP2PPeer(membersList):
 					clientStatus = "CONNECTED"
 					global forwardLink
 					forwardLink = (hashes[start], peerSocket)
-					_thread.start_new_thread (handlePeer, (peerSocket, ))	
+					_thread.start_new_thread (handlePeer, ("Forward", peerSocket, ))	
 					break
 				else:
 					peerSocket.close()
@@ -265,20 +287,30 @@ def P2PHandshake(peerSocket):
 
 def do_Send():
 	if userentry.get():
-		if forwardLink:
+		if clientStatus == "JOINED" or clientStatus == "CONNECTED":
 			global msgID
 			msgID += 1
-			msg = userentry.get()
-			byteArray = bytearray("T:"+roomname+":"+str(myHashID)+":"+username+":"+str(msgID)+":"+str(len(msg))+":"+msg+"::\r\n", 'utf-8')
-
-			forwardLink[1].send(byteArray)
-			for back in backlinks:
-				back[1].send(byteArray)
+			MsgWin.insert(1.0, "\n["+username+"] "+userentry.get())
+			echoMessage(myHashID, username, userentry.get(), msgID)
 		else:
-			print("No forward link")
+			print("Not joined any chat!")
+
+def echoMessage(originHashID, username, msg, msgID):
+	byteArray = bytearray("T:"+roomname+":"+str(originHashID)+":"+username+":"+str(msgID)+":"+str(len(msg))+":"+msg+"::\r\n", 'utf-8')
+	
+	if forwardLink:
+		if str(forwardLink[0][1]) != str(originHashID):
+			forwardLink[1].send(byteArray)
+	for back in backlinks:
+		if str(back[0][1]) != str(originHashID):
+			back[1].send(byteArray)
 
 def do_Quit():
 	roomServerSocket.close()
+	if forwardLink:
+		forwardLink[1].close()
+	for back in backlinks:
+		back[1].close()
 	sys.exit(0)
 
 #
