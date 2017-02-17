@@ -5,6 +5,7 @@
 # Python version: 3.5.2
 # Version: 1.0
 
+#TODO duplication of messages after a client quits... randomly some messages are getting duplicated..... use debug messages 
 
 from tkinter import *
 import sys
@@ -173,35 +174,46 @@ def handlePeer(linkType, conn):
 		response = conn.recv(1024)
 		response = str(response.decode("utf-8"))
 		
-		if response[0] == 'T':											#M stands for member list, so successful JOIN request
-			response = response[2:-4]
-			msgInfo = response.split(":")
-			room = msgInfo[0]
+		if response:
+			if response[0] == 'T':											#M stands for member list, so successful JOIN request
+				response = response[2:-4]
+				msgInfo = response.split(":")
+				room = msgInfo[0]
 			
-			if room == myRoom:
-				originHashID = msgInfo[1]
-				originUsername = msgInfo[2]
-				originMsgID = msgInfo[3]
-				originMsgLen = msgInfo[4]
-				originMsg = response[-(int(originMsgLen)):]
+				if room == myRoom:
+					originHashID = msgInfo[1]
+					originUsername = msgInfo[2]
+					originMsgID = msgInfo[3]
+					originMsgLen = msgInfo[4]
+					originMsg = response[-(int(originMsgLen)):]
 			
-				global messages
-				if (originHashID, originMsgID) not in messages:
-					MsgWin.insert(1.0, "\n["+originUsername+"] "+originMsg)
-					messages.append((originHashID, originMsgID))
-					echoMessage(originHashID, originUsername, originMsg, originMsgID)
-					arr = [member for member in hashes if str(member[1]) == str(originHashID) ]
-					if not arr:
-						print("not found hash", str(arr))
-						updateMembersList("Peer Handler")
-			else:
-				print("Recvd message from wrong chat room")
-		elif response[0] == 'F':
-			print("Error in message recvd")
+					global messages
+					if (originHashID, originMsgID) not in messages:
+						MsgWin.insert(1.0, "\n["+originUsername+"] "+originMsg)
+						messages.append((originHashID, originMsgID))
+						echoMessage(originHashID, originUsername, originMsg, originMsgID)
+						arr = [member for member in hashes if str(member[1]) == str(originHashID) ]
+						if not arr:
+							print("not found hash", str(arr))
+							updateMembersList("Peer Handler")
+				else:
+					print("Recvd message from wrong chat room")
+			elif response[0] == 'F':
+				print("Error in message recvd")
+		else:
+			break
 	
 	if linkType == "Forward":
 		updateMembersList("Peer Quit")
+		global forwardLink
+		forwardLink = ()
 		findP2PPeer(membersList)
+	else:
+		global backlinks
+		for back in backlinks:
+			if back[1] == conn:
+				backlinks.remove(back)
+				break
 		
 def updateMembersList(src):
 	roomServerSocket.send(bytearray("J:"+roomname+":"+username+":"+myIP+":"+myPort+"::\r\n", 'utf-8'))	
@@ -239,9 +251,10 @@ def calculateHashes(membersList):
 		if member[0] == username:
 			myInfo = member
 	hashes = sorted(hashes, key=lambda tup: tup[1])
+	return myInfo
 
 def findP2PPeer(membersList):
-	calculateHashes(membersList)
+	myInfo = calculateHashes(membersList)
 	global hashes
 	global myHashID
 	
@@ -298,19 +311,27 @@ def do_Send():
 def echoMessage(originHashID, username, msg, msgID):
 	byteArray = bytearray("T:"+roomname+":"+str(originHashID)+":"+username+":"+str(msgID)+":"+str(len(msg))+":"+msg+"::\r\n", 'utf-8')
 	
+	sentTo = []
 	if forwardLink:
 		if str(forwardLink[0][1]) != str(originHashID):
 			forwardLink[1].send(byteArray)
+			sentTo.append(str(forwardLink[0][1]))
+			
 	for back in backlinks:
 		if str(back[0][1]) != str(originHashID):
-			back[1].send(byteArray)
+			if not str(back[0][1]) in sentTo:
+				back[1].send(byteArray)
+				sentTo.append(str(back[0][1]))
 
 def do_Quit():
 	roomServerSocket.close()
+	print("Exit: Closed Socket to Room Server")
 	if forwardLink:
 		forwardLink[1].close()
+		print("Exit: Closed Socket to Forward link - ", forwardLink[0][0][0])
 	for back in backlinks:
 		back[1].close()
+		print("Exit: Closed Socket to Backward link - ", back[0][0][0])
 	sys.exit(0)
 
 #
