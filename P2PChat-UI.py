@@ -44,10 +44,10 @@ def sdbm_hash(instr):
 #
 
 def do_User():
+	global clientStatus
 	if userentry.get():					#If userentry is not empty
 		if clientStatus != "JOINED":			#and they have not joined a chat room
 			global username				#access the global variables . . 
-			global clientStatus
 			username = userentry.get()
 			clientStatus = "NAMED"			# . . and store the new values
 			CmdWin.insert(1.0, "\n[User] username: "+username)
@@ -101,7 +101,7 @@ def do_Join():
 				clientStatus = "JOINED"
 				
 				_thread.start_new_thread (keepAliveProcedure, ())	#Start a new thread runnning the keepAliveProcedure
-				_thread.start_new_thread (listenSocket, ())		#Start a new thread runnning the keepAliveProcedure
+				_thread.start_new_thread (serverProcedure, ())		#Start a new thread runnning the server part of P2P
 				findP2PPeer(membersList)				
 
 			elif response[0] == 'F':
@@ -113,45 +113,79 @@ def do_Join():
 		CmdWin.insert(1.0, "\nPlease enter room name!")	
 
 def keepAliveProcedure():
+	CmdWin.insert(1.0, "\nStarted KeepAlive Thread")
 	while roomServerSocket:					#While the serversocket is intact, keep sending a join request every 20 seconds
 		time.sleep(20)
-		roomServerSocket.send(bytearray("J:"+roomname+":"+username+":"+myIP+":"+myPort+"::\r\n", 'utf-8'))	
-		response = roomServerSocket.recv(1024)
-		
-		#TODO check hashID recvd, if diff from stored one, update the members list
-		#TODO move this whole part into new function which makes join request, handles response, updates hashID, updates member list
-		
-		print ("Keeping alive")
+		updateMembersList()				#Performs the JOIN request, also updates member list
 	
-def listenSocket():
+def serverProcedure():
 	sockfd = socket.socket()
 	sockfd.bind( ('', int(myPort)) )
-	sockfd.listen(5)
-	conn, address = sockfd.accept()
-	str2 = "Accepted connection from" + str(address)
-	print (str2)	
+	while sockfd:
+		sockfd.listen(5)
+		conn, address = sockfd.accept()
+		print ("Accepted connection from" + str(address))	
+		response = conn.recv(1024)
+		response = str(response.decode("utf-8"))
+		
+		if response[0] == 'P':
+			response = response[2:-4]
+			connectorInfo = response.split(":")
+			connectorRoomname = connectorInfo[0]
+			connectorUsername = connectorInfo[1]
+			connectorIP = connectorInfo[2]
+			connectorPort = connectorInfo[3]
+			connectorMsgID = connectorInfo[4]
+			global membersList			
+			try:
+				memberIndex = membersList.index(connectorInfo[1:4])
+			except ValueError:
+				if updateMembersList():
+					try:
+						memberIndex = membersList.index(connectorInfo[1:4])
+					except ValueError:
+						memberIndex = -1
+						print("Unable to connect to " + str(address))
+						conn.close()
+				else:
+					print("Unable to update member's list, so connection was rejected.")
+					conn.close()				
+			if memberIndex != -1:
+				conn.send(bytearray("S:"+str(msgID)+"::\r\n", 'utf-8'))	
+				#TODO create new thread to listen for incoming messages
+				_thread.start_new_thread (handlePeer, (conn, ))					#Start a new thread runnning the server part of P2P
+				
+		else:
+			conn.close()						#anything other than P or T must be failure so close
 	
-	#TODO verify that new connection is in the member's list, if not make a JOIN request again
-	
-	response = conn.recv(1024)
+def handlePeer(conn):
+	while conn:
+		response = conn.recv(1024)
+		response = str(response.decode("utf-8"))
+
+def updateMembersList():
+	roomServerSocket.send(bytearray("J:"+roomname+":"+username+":"+myIP+":"+myPort+"::\r\n", 'utf-8'))	
+	response = roomServerSocket.recv(1024)
 	response = str(response.decode("utf-8"))
-	
-	print ("Len:" + str(len(response)))
-	if response[0] == 'P':
-		#TODO declare new backward link
-		conn.send(bytearray("S:"+str(msgID)+"::\r\n", 'utf-8'))
-		#TODO create new thread to listen for incoming messages
-	elif response[0] == 'T':
-		#TODO received msg
-		conn.close()
-	else:
-		#anything other than P or T must be failure so close
-		conn.close()			
-	
+
+	if response[0] == 'M':
+		response = response[2:-4]
+		members = response.split(":")
+		global chatHashID
+		if chatHashID != members[0]:
+			global membersList				
+			chatHashID = members[0]
+			membersList = []
+			for group in chunker(members[1:], 3):
+				membersList.append(group)
+				print("Member list updated!")
+		return True
+	elif response[0] == 'F':
+		print("Error in performing JOIN request!")
+		return False
 
 def findP2PPeer(membersList):
 	hashes = []
-	
 	for member in membersList:
 		concat = ""
 		for info in member:
@@ -159,13 +193,10 @@ def findP2PPeer(membersList):
 		hashes.append((member,sdbm_hash(concat)))
 		if member[0] == username:
 			myInfo = member
-	
 	hashes = sorted(hashes, key=lambda tup: tup[1])
-	print (hashes)
 
 	myHashID = sdbm_hash(username+myIP+myPort)
 	start = (hashes.index((myInfo, myHashID)) + 1) % len(hashes)
-
 	success = False
 	while hashes[start][1] != myHashID:
 		if hashes[start] in backlinks:
@@ -173,10 +204,8 @@ def findP2PPeer(membersList):
 			continue
 		else:
 			peerSocket = socket.socket()
-			str = "Found peer: " + 
+			str = "Found peer: " + hashes[start][0][0] + "["+hashes[start][0][1]+", "+hashes[start][0][2]+"]"
 			print (str)
-			print (hashes[start][0][1])
-			print (hashes[start][0][2])
 			
 			peerSocket.connect((hashes[start][0][1], int(hashes[start][0][2])))
 			if peerSocket:			
@@ -196,8 +225,9 @@ def findP2PPeer(membersList):
 				start = (start + 1) % len(hashes) 
 				continue
 	if not success:
+		return
 		#TODO try again later
-		break
+		
 	
 def P2PHandshake(peerSocket):
 	peerSocket.send(bytearray("P:"+roomname+":"+username+":"+myIP+":"+myPort+":"+str(msgID)+"::\r\n", 'utf-8'))	
