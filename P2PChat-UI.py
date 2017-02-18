@@ -6,6 +6,9 @@
 # Version: 1.0
 
 #TODO duplication of messages after a client quits... randomly some messages are getting duplicated..... use debug messages 
+#TODO test cases of changing name at any time in state cycle
+#TODO test cases of pressing join at any time in state cycle
+#
 
 from tkinter import *
 import sys
@@ -49,11 +52,11 @@ def sdbm_hash(instr):
 
 def do_User():
 	global clientStatus
-	if userentry.get():					#If userentry is not empty
-		if clientStatus != "JOINED":			#and they have not joined a chat room
-			global username				#access the global variables . . 
+	if userentry.get():									#If userentry is not empty
+		if clientStatus != "JOINED" and clientStatus != "CONNECTED":			#and they have not joined a chat room
+			global username								#access the global variables . . 
 			username = userentry.get()
-			clientStatus = "NAMED"			# . . and store the new values
+			clientStatus = "NAMED"							# . . and store the new values
 			CmdWin.insert(1.0, "\n[User] username: "+username)
 			userentry.delete(0, END)
 		else:
@@ -62,19 +65,19 @@ def do_User():
 		CmdWin.insert(1.0, "\nPlease enter username!")
 
 def do_List():
-	roomServerSocket.send(bytearray("L::\r\n", 'utf-8'))	#Send the L request
-	response = roomServerSocket.recv(1024)			#Receive the response
-	response = str(response.decode("utf-8"))		#Convert from bytearray to string
-	if response[0] == 'G':					#Check if first char is G, signifying a successful request
-		response = response[2:-4]			#Trim the G: and ::\r\n from the response
-		if len(response) == 0:				#if response body is empty, no chat rooms exist
+	roomServerSocket.send(bytearray("L::\r\n", 'utf-8'))					#Send the L request
+	response = roomServerSocket.recv(1024)							#Receive the response
+	response = str(response.decode("utf-8"))						#Convert from bytearray to string
+	if response[0] == 'G':									#Check if first char is G, signifying a successful request
+		response = response[2:-4]							#Trim the G: and ::\r\n from the response
+		if len(response) == 0:								#if response body is empty, no chat rooms exist
 			CmdWin.insert(1.0, "\nNo active chatrooms")
-		else:						#else, split the array using the : char, and output to CmdWin
+		else:										#else, split the array using the : char, and output to CmdWin
 			rooms = response.split(":")
 			for room in rooms:
 				CmdWin.insert(1.0, "\n\t"+room)
 			CmdWin.insert(1.0, "\nHere are the active chat rooms:")	
-	elif response[0] == 'F':				#If first char is F, it is an error.
+	elif response[0] == 'F':								#If first char is F, it is an error.
 		CmdWin.insert(1.0, "\nError fetching chatroom list!")
 
 #ADAPTED FROM http://stackoverflow.com/questions/38680508/how-to-vstack-efficiently-a-sequence-of-large-numpy-array-chunks
@@ -92,24 +95,24 @@ def do_Join():
 				response = roomServerSocket.recv(1024)
 				response = str(response.decode("utf-8"))
 			
-				if response[0] == 'M':
-					response = response[2:-4]
-					members = response.split(":")
+				if response[0] == 'M':	
+					response = response[2:-4]				#Trim the M: and ::\r\n from the response
+					members = response.split(":")				#Split the array using the : char
 
 					global chatHashID 
-					chatHashID = members[0]
+					chatHashID = members[0]					#Store chathash to check if member list changed later on
 
 					global membersList
-					for group in chunker(members[1:], 3):
+					for group in chunker(members[1:], 3):			#Break array into array of arrays, each containing the username, IP and port for contacting
 						membersList.append(group)
 						CmdWin.insert(1.0, "\n"+str(group))
-					clientStatus = "JOINED"
+					clientStatus = "JOINED"					#Status is now JOINED
 					
 					global myRoom
-					myRoom = roomname
+					myRoom = roomname					#Store roomname joined
 					_thread.start_new_thread (keepAliveProcedure, ())	#Start a new thread runnning the keepAliveProcedure
 					_thread.start_new_thread (serverProcedure, ())		#Start a new thread runnning the server part of P2P
-					findP2PPeer(membersList)				
+					findP2PPeer(membersList)				#Find a peer to connect via
 				elif response[0] == 'F':
 					CmdWin.insert(1.0, "\nAlready joined another chatroom!!")
 			else:
@@ -124,21 +127,22 @@ def keepAliveProcedure():
 	while roomServerSocket:						#While the serversocket is intact, keep sending a join request . . . 
 		time.sleep(20)						# . . . every 20 seconds
 		updateMembersList("Keep Alive")				#Performs the JOIN request, also updates member list
-		if clientStatus == "JOINED":
+		if clientStatus == "JOINED":				#If client is still not CONNECTED, i.e. still in JOINED state, look for a peer
+			global membersList
 			findP2PPeer(membersList)
 	
 def serverProcedure():
 	sockfd = socket.socket()
 	sockfd.bind( ('', int(myPort)) )				#Create a socket on current IP, with port set as listening port
 	while sockfd:
-		sockfd.listen(5)
+		sockfd.listen(5)					
 		conn, address = sockfd.accept()
 		print ("Accepted connection from" + str(address))	
-		response = conn.recv(1024)
+		response = conn.recv(1024)				#Wait for P2P handshake message
 		response = str(response.decode("utf-8"))
 		
 		if response[0] == 'P':					#If peer initiated P2P handshake . . 
-			response = response[2:-4]
+			response = response[2:-4]			#Collect all info about the handshaker
 			connectorInfo = response.split(":")
 			connectorRoomname = connectorInfo[0]
 			connectorUsername = connectorInfo[1]
@@ -164,37 +168,39 @@ def serverProcedure():
 				concat = connectorUsername + connectorIP + connectorPort
 				backlinks.append(((connectorInfo[1:4],sdbm_hash(concat)), conn))		#add information of new connection to backlinks array
 				global clientStatus
-				clientStatus = "CONNECTED"
-				_thread.start_new_thread (handlePeer, ("Backward", conn, ))					#Start a new thread runnning the server part of P2P
+				clientStatus = "CONNECTED"							#Since client now has backlink, it is in CONNECTED state
+				_thread.start_new_thread (handlePeer, ("Backward", conn, ))			#Start a new thread runnning the server part of P2P
+				CmdWin.insert(1.0, "\n" + connectorUsername + " has linked to me")
 		else:
 			conn.close()										#anything other than P or T must be failure so close
 	
 def handlePeer(linkType, conn):
-	while conn:
-		response = conn.recv(1024)
+	while conn:												#While the connection is active
+		response = conn.recv(1024)									#Receive text messages
 		response = str(response.decode("utf-8"))
 		
-		if response:
-			if response[0] == 'T':											#M stands for member list, so successful JOIN request
+		if response:											#To check if the recv has not been un-blocked due to broken socket
+			if response[0] == 'T':									#T stands for text message, so successful message recvd
 				response = response[2:-4]
 				msgInfo = response.split(":")
-				room = msgInfo[0]
+				room = msgInfo[0]								#Get room name of message
 			
-				if room == myRoom:
+				if room == myRoom:								#if my room, collect all info from message
 					originHashID = msgInfo[1]
 					originUsername = msgInfo[2]
 					originMsgID = msgInfo[3]
 					originMsgLen = msgInfo[4]
-					originMsg = response[-(int(originMsgLen)):]
+					originMsg = response[-(int(originMsgLen)):]				#Get the last n chars from response, where n = len of message
 			
 					global messages
-					if (originHashID, originMsgID) not in messages:
+					CmdWin.insert(1.0, "\nRecvd Messages: "+str(messages))
+					if (originHashID, originMsgID) not in messages:				#If message has not been seen before, add it to msg window and store to messages array
 						MsgWin.insert(1.0, "\n["+originUsername+"] "+originMsg)
 						messages.append((originHashID, originMsgID))
-						echoMessage(originHashID, originUsername, originMsg, originMsgID)
-						arr = [member for member in hashes if str(member[1]) == str(originHashID) ]
-						if not arr:
-							print("not found hash", str(arr))
+						echoMessage(originHashID, originUsername, originMsg, originMsgID)	#Echo to all backlinks + forward link
+						arr = [member for member in hashes if str(member[1]) == str(originHashID) ] 
+						if not arr:							#If the arr doesnt contain the member that is the origin sender, update members list
+							print("Not found hash", str(arr))
 							updateMembersList("Peer Handler")
 				else:
 					print("Recvd message from wrong chat room")
@@ -203,12 +209,14 @@ def handlePeer(linkType, conn):
 		else:
 			break
 	
-	if linkType == "Forward":
-		updateMembersList("Peer Quit")
+	if linkType == "Forward":					#If a forward link has been broken, the client is DISCONNECTED, and put back in JOINED state
+		updateMembersList("Peer Quit")				#Update members list, reset forward link, look for new P2P peer
 		global forwardLink
 		forwardLink = ()
+		global clientStatus
+		clientStatus = "JOINED"
 		findP2PPeer(membersList)
-	else:
+	else:								#If back link broken, remove the link from backlinks array
 		global backlinks
 		for back in backlinks:
 			if back[1] == conn:
@@ -220,23 +228,23 @@ def updateMembersList(src):
 	response = roomServerSocket.recv(1024)
 	response = str(response.decode("utf-8"))
 
-	if response[0] == 'M':											#M stands for member list, so successful JOIN request
-		now = datetime.datetime.now()									#Time info for debugging purposes [to check if KEEPALIVE running every 20 seconds]
+	if response[0] == 'M':									#M stands for member list, so successful JOIN request
+		now = datetime.datetime.now()							#Time info for debugging purposes [to check if KEEPALIVE running every 20 seconds]
 		print(src, "Performing JOIN at", now.strftime("%Y-%m-%d %H:%M:%S"))
 		response = response[2:-4]
 		members = response.split(":")
 		global chatHashID
-		if chatHashID != members[0]:									#If hashID changed . . 
-			global membersList									# . . New members in room, update members list accordingly
+		if chatHashID != members[0]:							#If hashID changed . . 
+			global membersList							# . . New members in room, update members list accordingly
 			chatHashID = members[0]
 			membersList = []
 			for group in chunker(members[1:], 3):
 				membersList.append(group)
 			print("Member list updated!")
 			
-			calculateHashes(membersList)
+			calculateHashes(membersList)						#recalc the hashes
 		return True
-	elif response[0] == 'F':										#F stands for failure, throw error
+	elif response[0] == 'F':								#F stands for failure, throw error
 		print("Error in performing JOIN request!")
 		return False
 		
@@ -244,13 +252,13 @@ def calculateHashes(membersList):
 	global hashes 
 	hashes = []
 	for member in membersList:
-		concat = ""
+		concat = ""									#concatenate the member info
 		for info in member:
 			concat = concat + info
-		hashes.append((member,sdbm_hash(concat)))
-		if member[0] == username:
+		hashes.append((member,sdbm_hash(concat)))					#and add the member info, along with their hash to the hashes array
+		if member[0] == username:							
 			myInfo = member
-	hashes = sorted(hashes, key=lambda tup: tup[1])
+	hashes = sorted(hashes, key=lambda tup: tup[1])						#sort the array using the hash ID as the key
 	return myInfo
 
 def findP2PPeer(membersList):
@@ -258,72 +266,74 @@ def findP2PPeer(membersList):
 	global hashes
 	global myHashID
 	
-	myHashID = sdbm_hash(username+myIP+myPort)
-	start = (hashes.index((myInfo, myHashID)) + 1) % len(hashes)
+	myHashID = sdbm_hash(username+myIP+myPort)									#calc my hash id by concating all info
+	start = (hashes.index((myInfo, myHashID)) + 1) % len(hashes)							#find the index to start searching for peer
 
-	while hashes[start][1] != myHashID:
-		if [item for item in backlinks if item[0] == hashes[start]]:		
+	while hashes[start][1] != myHashID:										#Loop until you loop back to yourself
+		if [item for item in backlinks if item[0] == hashes[start]]:						#if the hashID exists in backlinks array, goto next index		
 			start = (start + 1) % len(hashes) 
 			continue
 		else:
-			outStr = "Found peer: " + hashes[start][0][0] + "["+hashes[start][0][1]+", "+hashes[start][0][2]+"]"
-			print (outStr)
-			
-			peerSocket = socket.socket()
+			peerSocket = socket.socket()									#if not, open a socket and try to connect 
 			peerSocket.connect((hashes[start][0][1], int(hashes[start][0][2])))
-			if peerSocket:			
-				if P2PHandshake(peerSocket):
-					CmdWin.insert(1.0, "\nConnected via - " + hashes[start][0][0])	
+			if peerSocket:											#if connection accepted
+				if P2PHandshake(peerSocket):								#init P2P handshake
+					CmdWin.insert(1.0, "\nConnected via - " + hashes[start][0][0])			#If success, store connection
 					global clientStatus
-					clientStatus = "CONNECTED"
-					global forwardLink
-					forwardLink = (hashes[start], peerSocket)
-					_thread.start_new_thread (handlePeer, ("Forward", peerSocket, ))	
+					clientStatus = "CONNECTED"							#Since forward link created, cliennt is now connected
+					global forwardLink				
+					forwardLink = (hashes[start], peerSocket)					#Store peer info, hashID and the socket to contact peer
+					_thread.start_new_thread (handlePeer, ("Forward", peerSocket, ))		#Start a new thread to listen for messages from client
 					break
 				else:
-					peerSocket.close()
+					peerSocket.close()								#P2P failed, close connection and try again at next index
 					start = (start + 1) % len(hashes) 
 					continue
 			else:
-				peerSocket.close()
+				peerSocket.close()									#Peer rejected connection request, try at next index
 				start = (start + 1) % len(hashes) 
 				continue		
+	#No need to reschedule, as call to findP2PPeer included in KEEPALIVE procedure, so if client is still in JOINED state after 20 seconds, KEEPALIVE proc will init this procedure. 
 	
 def P2PHandshake(peerSocket):
 	peerSocket.send(bytearray("P:"+roomname+":"+username+":"+myIP+":"+myPort+":"+str(msgID)+"::\r\n", 'utf-8'))	
 	response = peerSocket.recv(1024)
 	response = str(response.decode("utf-8"))
-	if response[0] == 'S':
+	if response[0] == 'S':					#If peer responds with S, it is a success, so return True else false
 		return True
 	else:
 		return False
 
 def do_Send():
 	if userentry.get():
-		if clientStatus == "JOINED" or clientStatus == "CONNECTED":
+		if clientStatus == "JOINED" or clientStatus == "CONNECTED":		#Only if client is JOINED or CONNECTED do we try and send the message
 			global msgID
-			msgID += 1
+			msgID += 1							#Increment msgID to denote new message
 			MsgWin.insert(1.0, "\n["+username+"] "+userentry.get())
-			echoMessage(myHashID, username, userentry.get(), msgID)
+			echoMessage(myHashID, username, userentry.get(), msgID)		#Call echoMessage with my details. 
 		else:
 			print("Not joined any chat!")
 
 def echoMessage(originHashID, username, msg, msgID):
+	#Prepare bytearray to be sent
 	byteArray = bytearray("T:"+roomname+":"+str(originHashID)+":"+username+":"+str(msgID)+":"+str(len(msg))+":"+msg+"::\r\n", 'utf-8')
 	
-	sentTo = []
-	if forwardLink:
-		if str(forwardLink[0][1]) != str(originHashID):
-			forwardLink[1].send(byteArray)
-			sentTo.append(str(forwardLink[0][1]))
+	sentTo = []									#Array to store the hashes of clients this message has been sent to
+	if forwardLink:									#If a forward link exists . . 
+		if str(forwardLink[0][1]) != str(originHashID):				# . . and it is not the origin sender
+			if not str(forwardLink[0][1]) in sentTo:			# . . and this message has not been sent to forward linked peer
+				forwardLink[1].send(byteArray)				#Send message and add to sentTo array
+				sentTo.append(str(forwardLink[0][1]))
 			
-	for back in backlinks:
-		if str(back[0][1]) != str(originHashID):
-			if not str(back[0][1]) in sentTo:
-				back[1].send(byteArray)
+	for back in backlinks:								#For all backlinked peers
+		if str(back[0][1]) != str(originHashID):				#If they are not the origin sender
+			if not str(back[0][1]) in sentTo:				#And message has not been sent to them
+				back[1].send(byteArray)					#Sned the message and add to the sentTo array
 				sentTo.append(str(back[0][1]))
+	#CmdWin.insert(1.0, "\nSent to " + str(sentTo))
 
 def do_Quit():
+	#Close all sockets - to the room server, to forward link if any, and to all the backlinked clients.
 	roomServerSocket.close()
 	print("Exit: Closed Socket to Room Server")
 	if forwardLink:
