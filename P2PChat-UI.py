@@ -14,6 +14,7 @@ from tkinter import *
 import sys
 import socket
 import _thread
+import threading
 import time
 import datetime
 
@@ -31,6 +32,8 @@ backlinks = []							#Array of tuples containing information of the backward lin
 forwardLink = ()						#Tuple containing information of the forward linked client, along with the socket to contact them
 messages = []							#Array storing the messages received (the hash ID of the sender, along with the msgID)
 hashes = []							#Array of tuples containing information of members, along with their hash ID
+lock = threading.Lock()						#mutex lock for messages array as it is shared between threads who append data to array; we dont want them to append together = could lead to duplication of messages if two threads i.e. two clients try to forward the same message at the same time 
+
 
 # This is the hash function for generating a unique
 # Hash ID for each peer.
@@ -127,7 +130,7 @@ def keepAliveProcedure():
 	while roomServerSocket:						#While the serversocket is intact, keep sending a join request . . . 
 		time.sleep(20)						# . . . every 20 seconds
 		updateMembersList("Keep Alive")				#Performs the JOIN request, also updates member list
-		if clientStatus == "JOINED":				#If client is still not CONNECTED, i.e. still in JOINED state, look for a peer
+		if clientStatus == "JOINED" or not forwardLink:		#If client is still not CONNECTED, i.e. still in JOINED state, look for a peer
 			global membersList
 			findP2PPeer(membersList)
 	
@@ -191,17 +194,21 @@ def handlePeer(linkType, conn):
 					originMsgID = msgInfo[3]
 					originMsgLen = msgInfo[4]
 					originMsg = response[-(int(originMsgLen)):]				#Get the last n chars from response, where n = len of message
-			
+					
+					lock.acquire()								#acquire the lock since this is the critical section where messages array is modified
 					global messages
-					CmdWin.insert(1.0, "\nRecvd Messages: "+str(messages))
 					if (originHashID, originMsgID) not in messages:				#If message has not been seen before, add it to msg window and store to messages array
 						MsgWin.insert(1.0, "\n["+originUsername+"] "+originMsg)
 						messages.append((originHashID, originMsgID))
-						echoMessage(originHashID, originUsername, originMsg, originMsgID)	#Echo to all backlinks + forward link
+						lock.release()									#Release lock since message has been appended
+						echoMessage(originHashID, originUsername, originMsg, originMsgID)		#Echo to all backlinks + forward link
 						arr = [member for member in hashes if str(member[1]) == str(originHashID) ] 
 						if not arr:							#If the arr doesnt contain the member that is the origin sender, update members list
 							print("Not found hash", str(arr))
 							updateMembersList("Peer Handler")
+					else:
+						lock.release()							#Release lock, since we have already seen this message so no need to append
+					
 				else:
 					print("Recvd message from wrong chat room")
 			elif response[0] == 'F':
@@ -308,7 +315,8 @@ def do_Send():
 	if userentry.get():
 		if clientStatus == "JOINED" or clientStatus == "CONNECTED":		#Only if client is JOINED or CONNECTED do we try and send the message
 			global msgID
-			msgID += 1							#Increment msgID to denote new message
+			msgID += 1
+			CmdWin.insert(1.0, "\n["+str(myHashID)+"] "+str(msgID))							#Increment msgID to denote new message
 			MsgWin.insert(1.0, "\n["+username+"] "+userentry.get())
 			echoMessage(myHashID, username, userentry.get(), msgID)		#Call echoMessage with my details. 
 		else:
